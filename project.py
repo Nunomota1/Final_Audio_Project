@@ -105,26 +105,30 @@ def fingerprint(inpfile):
 
 filepath = "songs_database/"
 
-# Percorre a base dos clipes de 30 segundos 
-for audio in os.listdir(filepath):
-    # Condição de como deve terminar o ficheiro
-    if audio.endswith(".wav"):
-        full_path = os.path.join(filepath, audio)
-        print(f"Audio: {audio}")
-        # Cálculo do fingerprint do áudio
-        value_fingerprint, mfcc, data_sinal, FS = fingerprint(full_path)
-        # Guarda no dicionário o fingerprint da música
-        data[audio] = value_fingerprint
-        # Visualização do fingerprint do áudio
-        plt.figure(figsize=(10, 4))
-        # Troca as linhas -> ou seja, coeficientes em função do tempo
-        # Eixo X: Frames
-        # Eixo Y: MFCC
-        plt.imshow(mfcc.T, aspect='auto', origin='lower')
-        plt.title(f"MFCC (manual pipeline): {audio}")
-        plt.xlabel("Frames")
-        plt.ylabel("MFCC Coefficients")
-        plt.colorbar()
-        plt.show(block=False)
-        plt.pause(2)
-        plt.close()
+# Este bloco so corre quando se executa "python project.py" diretamente.
+# Quando project.py e importado por outro modulo (ex.: identification.py),
+# nao queremos correr este loop nem abrir as janelas do matplotlib.
+if __name__ == "__main__":
+    # Percorre a base dos clipes de 30 segundos
+    for audio in os.listdir(filepath):
+        # Condição de como deve terminar o ficheiro
+        if audio.endswith(".wav"):
+            full_path = os.path.join(filepath, audio)
+            print(f"Audio: {audio}")
+            # Cálculo do fingerprint do áudio
+            value_fingerprint, mfcc, data_sinal, FS = fingerprint(full_path)
+            # Guarda no dicionário o fingerprint da música
+            data[audio] = value_fingerprint
+            # Visualização do fingerprint do áudio
+            plt.figure(figsize=(10, 4))
+            # Troca as linhas -> ou seja, coeficientes em função do tempo
+            # Eixo X: Frames
+            # Eixo Y: MFCC
+            plt.imshow(mfcc.T, aspect='auto', origin='lower')
+            plt.title(f"MFCC (manual pipeline): {audio}")
+            plt.xlabel("Frames")
+            plt.ylabel("MFCC Coefficients")
+            plt.colorbar()
+            plt.show(block=False)
+            plt.pause(2)
+            plt.close()
