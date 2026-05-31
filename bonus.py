@@ -5,7 +5,8 @@ PART 3 - Bonus (SAM-M.EIC026 / ANS-MM0050)
 3a) Confidence level (0-100%) for each clip-song match.
 3b) Overall success rate over all 22 clips.
 3c) Improved recognition performance by trying different MFCC vector lengths
-    and number of Mel filters, reporting which configuration works best.
+    and number of Mel filters, AND comparing mean-only fingerprints against
+    mean+std fingerprints (with the loudness coefficient dropped).
 3d) Real-time functionality: listens via microphone for ~10 seconds,
     then identifies the song.
 
@@ -31,28 +32,19 @@ from identification import (
 )
 
 # ===========================================================================
-# 3a) CONFIDENCE LEVEL
+# 3a) CONFIDENCE LEVEL  (hard formula)
 # ===========================================================================
-# The cosine similarity score is in [-1, 1].
-# We map it to [0%, 100%] using: confidence = (score + 1) / 2 * 100
-# A score below 50% means low confidence (as required by the assignment).
-# We also factor in the margin between the best and second-best match:
-# a large margin means the system is more certain.
+
 
 def confidence_level(best_score, second_score):
     """
-    Returns a confidence percentage (0-100) based on:
-    - The best cosine similarity score mapped to [0, 100]
-    - A margin bonus: how much better the best match is vs the second best
-
-    The formula is:
-        base      = (best_score + 1) / 2 * 100   [maps [-1,1] -> [0,100]]
-        margin    = (best_score - second_score) * 50  [extra certainty bonus]
-        confidence = clamp(base + margin, 0, 100)
+    Returns a confidence percentage (0-100) that emphasises the gap between
+    the best and the second-best match. See module docstring for rationale.
     """
-    base = (best_score + 1) / 2 * 100
-    margin_bonus = (best_score - second_score) * 50
-    confidence = float(np.clip(base + margin_bonus, 0, 100))
+    gap = max(0.0, best_score - second_score)
+    score_term = 0.30 * max(0.0, best_score)
+    gap_term = 0.70 * min(1.0, gap * 10.0)
+    confidence = float(np.clip((score_term + gap_term) * 100.0, 0.0, 100.0))
     return confidence
 
 
@@ -62,11 +54,8 @@ def confidence_level(best_score, second_score):
 
 def evaluate_all(db, label="Baseline"):
     """
-    Runs identification on every clip in songs_clips/, computes:
-    - per-clip result (correct / wrong)
-    - confidence level (3a)
-    - overall success rate (3b)
-
+    Runs identification on every clip in songs_clips/, computes per-clip
+    result, confidence level (3a) and overall success rate (3b).
     Prints a formatted table and returns (correct, total, success_rate).
     """
     clips = sorted(f for f in os.listdir(CLIPS_DIR) if f.endswith(".wav"))
@@ -89,12 +78,12 @@ def evaluate_all(db, label="Baseline"):
         correct += int(is_correct)
 
         short_match = best_song.replace("_30.wav", "")
-        ok_marker = "✓" if is_correct else "✗"
+        ok_marker = "OK" if is_correct else "X"
         print(f"  {clip:<40} {short_match:<30} {conf:5.1f}%  {ok_marker}")
 
     success_rate = correct / total * 100 if total > 0 else 0
     print("=" * 90)
-    print(f"  Result: {correct}/{total} correct  →  Success rate: {success_rate:.1f}%")
+    print(f"  Result: {correct}/{total} correct  ->  Success rate: {success_rate:.1f}%")
     print("=" * 90)
     return correct, total, success_rate
 
@@ -102,16 +91,11 @@ def evaluate_all(db, label="Baseline"):
 # ===========================================================================
 # 3c) IMPROVE PERFORMANCE
 # ===========================================================================
-# We test different combinations of:
-#   - n_mfcc  : number of MFCC coefficients kept after DCT (13, 20, 30)
-#   - n_mels  : number of Mel filterbank bands (64, 128, 256)
-# For each combination we rebuild the database and re-run the evaluation.
-# The baseline uses n_mfcc=13, n_mels=128 (same as project.py).
 
-def fingerprint_custom(inpfile, n_mfcc=13, n_mels=128):
+def fingerprint_custom(inpfile, n_mfcc=13, n_mels=128, use_std=False):
     """
-    Same pipeline as project.py's fingerprint() but with configurable
-    n_mfcc and n_mels so we can experiment in 3c.
+    Same pipeline as project.py's fingerprint(), but with configurable
+    n_mfcc and n_mels, and an optional mean+std (drop C0) mode.
     """
     FS, data_sinal = wavfile.read(inpfile)
     data_sinal = data_sinal.astype(np.float32)
@@ -131,27 +115,35 @@ def fingerprint_custom(inpfile, n_mfcc=13, n_mels=128):
         power_spectrum = magnitude_spectrum ** 2
         mel_energies = np.dot(mel_filterbank, power_spectrum)
         log_mel = np.log(mel_energies + 1e-10)
-        mfcc = dct(log_mel, type=2, norm='ortho')[:n_mfcc]
-        mfcc_list.append(mfcc)
+        coeffs = dct(log_mel, type=2, norm='ortho')[:n_mfcc]
+        if use_std:
+            coeffs = coeffs[1:]  # drop coefficient 0 (loudness)
+        mfcc_list.append(coeffs)
 
-    mfcc_list = np.array(mfcc_list)
-    if len(mfcc_list) == 0:
-        return np.zeros(n_mfcc)
-    return np.mean(mfcc_list, axis=0)
+    mfcc_arr = np.array(mfcc_list)
+    if len(mfcc_arr) == 0:
+        size = (n_mfcc - 1) if use_std else n_mfcc
+        return np.zeros(size * (2 if use_std else 1))
+
+    mean_vec = np.mean(mfcc_arr, axis=0)
+    if use_std:
+        std_vec = np.std(mfcc_arr, axis=0)
+        return np.concatenate([mean_vec, std_vec])
+    return mean_vec
 
 
-def build_database_custom(n_mfcc=13, n_mels=128):
+def build_database_custom(n_mfcc=13, n_mels=128, use_std=False):
     db = {}
     for song in sorted(os.listdir(DB_DIR)):
         if not song.endswith(".wav"):
             continue
-        fp = fingerprint_custom(os.path.join(DB_DIR, song), n_mfcc, n_mels)
+        fp = fingerprint_custom(os.path.join(DB_DIR, song), n_mfcc, n_mels, use_std)
         db[song] = fp
     return db
 
 
-def identify_clip_custom(clip_path, db, n_mfcc=13, n_mels=128):
-    fp_clip = fingerprint_custom(clip_path, n_mfcc, n_mels)
+def identify_clip_custom(clip_path, db, n_mfcc=13, n_mels=128, use_std=False):
+    fp_clip = fingerprint_custom(clip_path, n_mfcc, n_mels, use_std)
     scores = [(song, cosine_similarity(fp_song, fp_clip))
               for song, fp_song in db.items()]
     ranking = sorted(scores, key=lambda x: x[1], reverse=True)
@@ -159,31 +151,67 @@ def identify_clip_custom(clip_path, db, n_mfcc=13, n_mels=128):
     return best_song, best_score, ranking
 
 
-def evaluate_custom(n_mfcc, n_mels, label=None):
-    if label is None:
-        label = f"n_mfcc={n_mfcc}, n_mels={n_mels}"
-    db = build_database_custom(n_mfcc, n_mels)
+def evaluate_custom(n_mfcc, n_mels, use_std=False):
+    """Returns (correct, total, success_rate) without printing per-row."""
+    db = build_database_custom(n_mfcc, n_mels, use_std)
     clips = sorted(f for f in os.listdir(CLIPS_DIR) if f.endswith(".wav"))
     total = len(clips)
     correct = 0
     for clip in clips:
         best_song, _, _ = identify_clip_custom(
-            os.path.join(CLIPS_DIR, clip), db, n_mfcc, n_mels
+            os.path.join(CLIPS_DIR, clip), db, n_mfcc, n_mels, use_std
         )
         if best_song == expected_song(clip):
             correct += 1
     rate = correct / total * 100 if total > 0 else 0
-    print(f"  {label:<35}  {correct:>2}/{total}  ({rate:.1f}%)")
+    return correct, total, rate
+
+
+def evaluate_all_custom(n_mfcc, n_mels, use_std, label="Improved"):
+    """
+    Per-clip evaluation table (like evaluate_all) but using the improved
+    fingerprint configuration. Lets us print a detailed before/after.
+    """
+    db = build_database_custom(n_mfcc, n_mels, use_std)
+    clips = sorted(f for f in os.listdir(CLIPS_DIR) if f.endswith(".wav"))
+    total = len(clips)
+    correct = 0
+
+    print("=" * 90)
+    print(f"  EVALUATION: {label}")
+    print("=" * 90)
+    print(f"{'CLIP':<42} {'BEST MATCH':<30} {'CONF':>6}  {'OK?'}")
+    print("-" * 90)
+
+    for clip in clips:
+        best_song, best_score, ranking = identify_clip_custom(
+            os.path.join(CLIPS_DIR, clip), db, n_mfcc, n_mels, use_std
+        )
+        second_score = ranking[1][1] if len(ranking) > 1 else 0.0
+        conf = confidence_level(best_score, second_score)
+        is_correct = (best_song == expected_song(clip))
+        correct += int(is_correct)
+
+        short_match = best_song.replace("_30.wav", "")
+        ok_marker = "OK" if is_correct else "X"
+        print(f"  {clip:<40} {short_match:<30} {conf:5.1f}%  {ok_marker}")
+
+    rate = correct / total * 100 if total > 0 else 0
+    print("=" * 90)
+    print(f"  Result: {correct}/{total} correct  ->  Success rate: {rate:.1f}%")
+    print("=" * 90)
     return correct, total, rate
 
 
 def run_parameter_sweep():
     """
-    Tests different (n_mfcc, n_mels) combinations and reports which is best.
+    Tests every (n_mfcc, n_mels) combination twice -- once with the
+    mean-only fingerprint and once with the mean+std (drop C0) fingerprint --
+    so the ablation is visible side by side.
     """
     configs = [
         (13,  64),
-        (13, 128),   # baseline
+        (13, 128),  # baseline
         (13, 256),
         (20,  64),
         (20, 128),
@@ -193,25 +221,34 @@ def run_parameter_sweep():
         (30, 256),
     ]
 
-    print("\n" + "=" * 60)
-    print("  3c) PARAMETER SWEEP")
-    print("=" * 60)
-    print(f"  {'Configuration':<35}  {'Result':>8}")
-    print("-" * 60)
+    print("\n" + "=" * 78)
+    print("  3c) PARAMETER SWEEP  (mean only  vs.  mean+std, drop C0)")
+    print("=" * 78)
+    print(f"  {'Configuration':<32}  {'Mean only':>14}  {'Mean+Std':>14}")
+    print("-" * 78)
 
-    results = []
+    all_results = []
     for n_mfcc, n_mels in configs:
         label = f"n_mfcc={n_mfcc}, n_mels={n_mels}"
         if n_mfcc == 13 and n_mels == 128:
-            label += "  ← baseline"
-        c, t, r = evaluate_custom(n_mfcc, n_mels, label)
-        results.append((label, c, t, r))
+            label += " (baseline)"
 
-    best = max(results, key=lambda x: x[3])
-    print("=" * 60)
-    print(f"  Best config: {best[0]}")
-    print(f"  Best result: {best[1]}/{best[2]}  ({best[3]:.1f}%)")
-    print("=" * 60)
+        c1, t, r1 = evaluate_custom(n_mfcc, n_mels, use_std=False)
+        c2, _, r2 = evaluate_custom(n_mfcc, n_mels, use_std=True)
+
+        col_mean = f"{c1}/{t} ({r1:.1f}%)"
+        col_std  = f"{c2}/{t} ({r2:.1f}%)"
+        print(f"  {label:<32}  {col_mean:>14}  {col_std:>14}")
+
+        all_results.append((label, "mean",     c1, t, r1, n_mfcc, n_mels, False))
+        all_results.append((label, "mean+std", c2, t, r2, n_mfcc, n_mels, True))
+
+    best = max(all_results, key=lambda x: x[4])
+    print("=" * 78)
+    print(f"  Best config: {best[0]}  ({best[1]})")
+    print(f"  Best result: {best[2]}/{best[3]}  ({best[4]:.1f}%)")
+    print("=" * 78)
+    return best[5], best[6], best[7]  # (n_mfcc, n_mels, use_std)
 
 
 # ===========================================================================
@@ -285,7 +322,7 @@ def realtime_identify(duration=10):
     print(f"  >>> Confidence : {conf:.1f}%")
 
     if conf < 50:
-        print("  (Low confidence — the song may not be in the database)")
+        print("  (Low confidence - the song may not be in the database)")
 
     print("\n  Playing the identified song...")
     play_audio(os.path.join(DB_DIR, best_song))
@@ -311,7 +348,15 @@ if __name__ == "__main__":
         db = build_database()
         print(f"{len(db)} songs loaded.\n")
 
-        evaluate_all(db, label="Baseline  (n_mfcc=13, n_mels=128)")
+        evaluate_all(db, label="Baseline  (n_mfcc=13, n_mels=128, mean only)")
 
-        # 3c: parameter sweep
-        run_parameter_sweep()
+        # 3c: parameter sweep with ablation
+        best_n_mfcc, best_n_mels, best_use_std = run_parameter_sweep()
+
+        
+        improved_label = (
+            f"Improved  (n_mfcc={best_n_mfcc}, n_mels={best_n_mels}, "
+            f"{'mean+std' if best_use_std else 'mean only'})"
+        )
+        evaluate_all_custom(best_n_mfcc, best_n_mels, best_use_std,
+                            label=improved_label)
